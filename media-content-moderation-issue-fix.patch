@@ -1,0 +1,520 @@
+diff --git a/web/core/modules/media/config/optional/views.view.media.yml b/web/core/modules/media/config/optional/views.view.media.yml
+index cbcb293b..363ba7f5 100644
+--- a/web/core/modules/media/config/optional/views.view.media.yml
++++ b/web/core/modules/media/config/optional/views.view.media.yml
+@@ -445,6 +445,15 @@ display:
+             date_format: short
+             custom_date_format: ''
+             timezone: ''
++            tooltip:
++              date_format: long
++              custom_date_format: ''
++            time_diff:
++              enabled: false
++              future_format: '@interval hence'
++              past_format: '@interval ago'
++              granularity: 2
++              refresh: 60
+           group_column: value
+           group_columns: {  }
+           group_rows: true
+diff --git a/web/core/modules/media/config/schema/media.schema.yml b/web/core/modules/media/config/schema/media.schema.yml
+index 08bf800f..b5322c9c 100644
+--- a/web/core/modules/media/config/schema/media.schema.yml
++++ b/web/core/modules/media/config/schema/media.schema.yml
+@@ -59,6 +59,13 @@ field.formatter.settings.oembed:
+     max_height:
+       type: integer
+       label: 'Maximum height'
++    loading:
++      type: mapping
++      label: 'oEmbed loading settings'
++      mapping:
++        attribute:
++          type: string
++          label: 'Loading attribute'
+ 
+ field.widget.settings.oembed_textfield:
+   type: field.widget.settings.string_textfield
+diff --git a/web/core/modules/media/media.module b/web/core/modules/media/media.module
+index 30b219e5..83884fe4 100644
+--- a/web/core/modules/media/media.module
++++ b/web/core/modules/media/media.module
+@@ -7,6 +7,7 @@
+ 
+ use Drupal\Component\Plugin\DerivativeInspectionInterface;
+ use Drupal\Core\Access\AccessResult;
++use Drupal\Core\Entity\Display\EntityViewDisplayInterface;
+ use Drupal\Core\Entity\EntityInterface;
+ use Drupal\Core\Form\FormStateInterface;
+ use Drupal\Core\Render\Element;
+@@ -16,6 +17,7 @@
+ use Drupal\Core\Template\Attribute;
+ use Drupal\Core\Url;
+ use Drupal\field\FieldConfigInterface;
++use Drupal\media\MediaConfigUpdater;
+ use Drupal\media\Plugin\media\Source\OEmbedInterface;
+ use Drupal\views\ViewExecutable;
+ 
+@@ -369,6 +371,15 @@ function media_entity_type_alter(array &$entity_types) {
+   }
+ }
+ 
++/**
++ * Implements hook_ENTITY_TYPE_presave() for entity_view_display.
++ */
++function media_entity_view_display_presave(EntityViewDisplayInterface $view_display): void {
++  $config_updater = \Drupal::classResolver(MediaConfigUpdater::class);
++  assert($config_updater instanceof MediaConfigUpdater);
++  $config_updater->processOembedEagerLoadField($view_display);
++}
++
+ /**
+  * Implements hook_form_FORM_ID_alter().
+  */
+diff --git a/web/core/modules/media/media.post_update.php b/web/core/modules/media/media.post_update.php
+index 04fbc9c8..12b5709b 100644
+--- a/web/core/modules/media/media.post_update.php
++++ b/web/core/modules/media/media.post_update.php
+@@ -5,6 +5,10 @@
+  * Post update functions for Media.
+  */
+ 
++use Drupal\Core\Config\Entity\ConfigEntityUpdater;
++use Drupal\Core\Entity\Display\EntityViewDisplayInterface;
++use Drupal\media\MediaConfigUpdater;
++
+ /**
+  * Implements hook_removed_post_updates().
+  */
+@@ -17,3 +21,15 @@ function media_removed_post_updates() {
+     'media_post_update_modify_base_field_author_override' => '10.0.0',
+   ];
+ }
++
++/**
++ * Add the oEmbed loading attribute setting to field formatter instances.
++ */
++function media_post_update_oembed_loading_attribute(array &$sandbox = NULL): void {
++  $media_config_updater = \Drupal::classResolver(MediaConfigUpdater::class);
++  assert($media_config_updater instanceof MediaConfigUpdater);
++  $media_config_updater->setDeprecationsEnabled(TRUE);
++  \Drupal::classResolver(ConfigEntityUpdater::class)->update($sandbox, 'entity_view_display', function (EntityViewDisplayInterface $view_display) use ($media_config_updater): bool {
++    return $media_config_updater->processOembedEagerLoadField($view_display);
++  });
++}
+diff --git a/web/core/modules/media/media.routing.yml b/web/core/modules/media/media.routing.yml
+index 5dc97324..03a5c5af 100644
+--- a/web/core/modules/media/media.routing.yml
++++ b/web/core/modules/media/media.routing.yml
+@@ -1,7 +1,7 @@
+ entity.media.revision:
+   path: '/media/{media}/revisions/{media_revision}/view'
+   defaults:
+-    _controller: '\Drupal\Core\Entity\Controller\EntityViewController::viewRevision'
++    _controller: '\Drupal\Core\Entity\Controller\EntityRevisionViewController'
+     _title_callback: '\Drupal\Core\Entity\Controller\EntityController::title'
+   options:
+     parameters:
+diff --git a/web/core/modules/media/src/Form/EditorMediaDialog.php b/web/core/modules/media/src/Form/EditorMediaDialog.php
+index 8a961df6..c76bb915 100644
+--- a/web/core/modules/media/src/Form/EditorMediaDialog.php
++++ b/web/core/modules/media/src/Form/EditorMediaDialog.php
+@@ -23,6 +23,11 @@
+  * editor, this dialog allows users to set the alt text, alignment, and
+  * captioning status for embedded media items.
+  *
++ * @deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. There is no
++ * replacement.
++ *
++ * @see https://www.drupal.org/project/drupal/issues/3291493
++ *
+  * @internal
+  *   This is an internal part of the media system in Drupal core and may be
+  *   subject to change in minor releases. This class should not be
+@@ -53,6 +58,7 @@ class EditorMediaDialog extends FormBase {
+    *   The entity display repository.
+    */
+   public function __construct(EntityRepositoryInterface $entity_repository, EntityDisplayRepositoryInterface $entity_display_repository) {
++    @trigger_error(__NAMESPACE__ . '\EditorMediaDialog is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. There is no replacement. See https://www.drupal.org/project/drupal/issues/3291493', E_USER_DEPRECATED);
+     $this->entityRepository = $entity_repository;
+     $this->entityDisplayRepository = $entity_display_repository;
+   }
+diff --git a/web/core/modules/media/src/MediaForm.php b/web/core/modules/media/src/MediaForm.php
+index 45cff5fd..93a9776f 100644
+--- a/web/core/modules/media/src/MediaForm.php
++++ b/web/core/modules/media/src/MediaForm.php
+@@ -64,11 +64,11 @@ public function save(array $form, FormStateInterface $form_state) {
+     $t_args = ['@type' => $this->entity->bundle->entity->label(), '%label' => $this->entity->toLink($this->entity->label())->toString()];
+ 
+     if ($saved === SAVED_NEW) {
+-      $logger->notice('@type: added %label.', $context);
++      $logger->info('@type: added %label.', $context);
+       $this->messenger()->addStatus($this->t('@type %label has been created.', $t_args));
+     }
+     else {
+-      $logger->notice('@type: updated %label.', $context);
++      $logger->info('@type: updated %label.', $context);
+       $this->messenger()->addStatus($this->t('@type %label has been updated.', $t_args));
+     }
+ 
+diff --git a/web/core/modules/media/src/MediaSourceBase.php b/web/core/modules/media/src/MediaSourceBase.php
+index df21b94c..063706d4 100644
+--- a/web/core/modules/media/src/MediaSourceBase.php
++++ b/web/core/modules/media/src/MediaSourceBase.php
+@@ -301,9 +301,14 @@ public function createSourceField(MediaTypeInterface $type) {
+    *   returned. Otherwise, a new, unused one is generated.
+    */
+   protected function getSourceFieldName() {
++    // If the Field UI module is installed, and has a specific prefix
++    // configured, use that. Otherwise, just default to using 'field_' as
++    // a prefix, which is the default that Field UI ships with.
++    $prefix = $this->configFactory->get('field_ui.settings')
++      ->get('field_prefix') ?? 'field_';
+     // Some media sources are using a deriver, so their plugin IDs may contain
+     // a separator (usually ':') which is not allowed in field names.
+-    $base_id = 'field_media_' . str_replace(static::DERIVATIVE_SEPARATOR, '_', $this->getPluginId());
++    $base_id = $prefix . 'media_' . str_replace(static::DERIVATIVE_SEPARATOR, '_', $this->getPluginId());
+     $tries = 0;
+     $storage = $this->entityTypeManager->getStorage('field_storage_config');
+ 
+diff --git a/web/core/modules/media/src/OEmbed/UrlResolver.php b/web/core/modules/media/src/OEmbed/UrlResolver.php
+index 4f4e4d72..c7d0e603 100644
+--- a/web/core/modules/media/src/OEmbed/UrlResolver.php
++++ b/web/core/modules/media/src/OEmbed/UrlResolver.php
+@@ -191,7 +191,7 @@ public function getResourceUrl($url, $max_width = NULL, $max_height = NULL) {
+    *   The oEmbed provider for the asset.
+    *
+    * @return string
+-   *   The resource url.
++   *   The resource URL.
+    */
+   protected function getEndpointMatchingUrl($url, Provider $provider) {
+     $endpoints = $provider->getEndpoints();
+diff --git a/web/core/modules/media/src/Plugin/Field/FieldFormatter/OEmbedFormatter.php b/web/core/modules/media/src/Plugin/Field/FieldFormatter/OEmbedFormatter.php
+index c0062314..695754b5 100644
+--- a/web/core/modules/media/src/Plugin/Field/FieldFormatter/OEmbedFormatter.php
++++ b/web/core/modules/media/src/Plugin/Field/FieldFormatter/OEmbedFormatter.php
+@@ -150,6 +150,9 @@ public static function defaultSettings() {
+     return [
+       'max_width' => 0,
+       'max_height' => 0,
++      'loading' => [
++        'attribute' => 'lazy',
++      ],
+     ] + parent::defaultSettings();
+   }
+ 
+@@ -191,6 +194,9 @@ public function viewElements(FieldItemListInterface $items, $langcode) {
+           '#uri' => $resource->getUrl()->toString(),
+           '#width' => $max_width ?: $resource->getWidth(),
+           '#height' => $max_height ?: $resource->getHeight(),
++          '#attributes' => [
++            'loading' => $this->getSetting('loading')['attribute'],
++          ],
+         ];
+       }
+       else {
+@@ -221,6 +227,7 @@ public function viewElements(FieldItemListInterface $items, $langcode) {
+             'width' => $max_width ?: $resource->getWidth(),
+             'height' => $max_height ?: $resource->getHeight(),
+             'class' => ['media-oembed-content'],
++            'loading' => $this->getSetting('loading')['attribute'],
+           ],
+           '#attached' => [
+             'library' => [
+@@ -248,7 +255,7 @@ public function viewElements(FieldItemListInterface $items, $langcode) {
+    * {@inheritdoc}
+    */
+   public function settingsForm(array $form, FormStateInterface $form_state) {
+-    return parent::settingsForm($form, $form_state) + [
++    $form = parent::settingsForm($form, $form_state) + [
+       'max_width' => [
+         '#type' => 'number',
+         '#title' => $this->t('Maximum width'),
+@@ -267,7 +274,28 @@ public function settingsForm(array $form, FormStateInterface $form_state) {
+         '#field_suffix' => $this->t('pixels'),
+         '#min' => 0,
+       ],
++      'loading' => [
++        '#type' => 'details',
++        '#title' => $this->t('oEmbed loading'),
++        '#description' => $this->t('Lazy render oEmbed with native loading attribute (<em>loading="lazy"</em>). This improves performance by allowing browsers to lazily load assets.'),
++        'attribute' => [
++          '#title' => $this->t('oEmbed loading attribute'),
++          '#type' => 'radios',
++          '#default_value' => $this->getSetting('loading')['attribute'],
++          '#options' => [
++            'lazy' => $this->t('Lazy (<em>loading="lazy"</em>)'),
++            'eager' => $this->t('Eager (<em>loading="eager"</em>)'),
++          ],
++          '#description' => $this->t('Select the loading attribute for oEmbed. <a href=":link">Learn more about the loading attribute for oEmbed.</a>', [
++            ':link' => 'https://html.spec.whatwg.org/multipage/urls-and-fetching.html#lazy-loading-attributes',
++          ]),
++        ],
++      ],
+     ];
++    $form['loading']['attribute']['lazy']['#description'] = $this->t('Delays loading the resource until that section of the page is visible in the browser. When in doubt, lazy loading is recommended.');
++    $form['loading']['attribute']['eager']['#description'] = $this->t('Force browsers to download a resource as soon as possible. This is the browser default for legacy reasons. Only use this option when the resource is always expected to render.');
++
++    return $form;
+   }
+ 
+   /**
+@@ -291,6 +319,10 @@ public function settingsSummary() {
+         '%max_height' => $this->getSetting('max_height'),
+       ]);
+     }
++    $summary[] = $this->t('Loading attribute: @attribute', [
++      '@attribute' => $this->getSetting('loading')['attribute'],
++    ]);
++
+     return $summary;
+   }
+ 
+diff --git a/web/core/modules/media/tests/modules/media_test_source/src/Plugin/Validation/Constraint/MediaTestConstraintValidator.php b/web/core/modules/media/tests/modules/media_test_source/src/Plugin/Validation/Constraint/MediaTestConstraintValidator.php
+index 1c744430..d54c71a0 100644
+--- a/web/core/modules/media/tests/modules/media_test_source/src/Plugin/Validation/Constraint/MediaTestConstraintValidator.php
++++ b/web/core/modules/media/tests/modules/media_test_source/src/Plugin/Validation/Constraint/MediaTestConstraintValidator.php
+@@ -26,7 +26,7 @@ public function validate($value, Constraint $constraint) {
+       return;
+     }
+ 
+-    if (strpos($string_to_test, 'love Drupal') === FALSE) {
++    if (!str_contains($string_to_test, 'love Drupal')) {
+       $this->context->addViolation($constraint->message);
+     }
+   }
+diff --git a/web/core/modules/media/tests/src/Functional/FieldFormatter/OEmbedFormatterTest.php b/web/core/modules/media/tests/src/Functional/FieldFormatter/OEmbedFormatterTest.php
+index 53f4b40e..8a382397 100644
+--- a/web/core/modules/media/tests/src/Functional/FieldFormatter/OEmbedFormatterTest.php
++++ b/web/core/modules/media/tests/src/Functional/FieldFormatter/OEmbedFormatterTest.php
+@@ -66,8 +66,10 @@ public function providerRender() {
+             'width' => '480',
+             'height' => '360',
+             'title' => 'Drupal Rap Video - Schipulcon09',
++            'loading' => 'lazy',
+           ],
+         ],
++        'self_closing' => TRUE,
+       ],
+       'Vimeo video, resized' => [
+         'https://vimeo.com/7073899',
+@@ -79,8 +81,10 @@ public function providerRender() {
+             'width' => '100',
+             'height' => '100',
+             'title' => 'Drupal Rap Video - Schipulcon09',
++            'loading' => 'lazy',
+           ],
+         ],
++        'self_closing' => TRUE,
+       ],
+       'Vimeo video, no title' => [
+         'https://vimeo.com/7073899',
+@@ -92,8 +96,10 @@ public function providerRender() {
+             'width' => '480',
+             'height' => '360',
+             'title' => NULL,
++            'loading' => 'lazy',
+           ],
+         ],
++        'self_closing' => TRUE,
+       ],
+       'tweet' => [
+         'https://twitter.com/drupaldevdays/status/935643039741202432',
+@@ -102,14 +108,17 @@ public function providerRender() {
+           // The tweet resource does not specify a height, so the formatter
+           // should default to the configured maximum height.
+           'max_height' => 360,
++          'loading' => ['attribute' => 'eager'],
+         ],
+         [
+           'iframe' => [
+             'src' => '/media/oembed?url=https%3A//twitter.com/drupaldevdays/status/935643039741202432',
+             'width' => '550',
+             'height' => '360',
++            'loading' => 'eager',
+           ],
+         ],
++        'self_closing' => TRUE,
+       ],
+       'Flickr photo' => [
+         'https://www.flickr.com/photos/amazeelabs/26497866357',
+@@ -120,8 +129,10 @@ public function providerRender() {
+             'src' => '/core/misc/druplicon.png',
+             'width' => '88',
+             'height' => '100',
++            'loading' => 'lazy',
+           ],
+         ],
++        'self_closing' => FALSE,
+       ],
+       'Flickr photo (no dimensions)' => [
+         'https://www.flickr.com/photos/amazeelabs/26497866357',
+@@ -130,8 +141,10 @@ public function providerRender() {
+         [
+           'img' => [
+             'src' => '/core/misc/druplicon.png',
++            'loading' => 'lazy',
+           ],
+         ],
++        'self_closing' => FALSE,
+       ],
+     ];
+   }
+@@ -166,10 +179,12 @@ public function testDisplayConfiguration() {
+    *   An array of arrays. Each key is a CSS selector targeting an element in
+    *   the rendered output, and each value is an array of attributes, keyed by
+    *   name, that the element is expected to have.
++   * @param bool $self_closing
++   *   Indicator if the HTML element is self closing i.e. <p/> vs <p></p>.
+    *
+    * @dataProvider providerRender
+    */
+-  public function testRender($url, $resource_url, array $formatter_settings, array $selectors) {
++  public function testRender($url, $resource_url, array $formatter_settings, array $selectors, bool $self_closing) {
+     $account = $this->drupalCreateUser(['view media']);
+     $this->drupalLogin($account);
+ 
+@@ -206,6 +221,9 @@ public function testRender($url, $resource_url, array $formatter_settings, array
+     $assert->statusCodeEquals(200);
+     foreach ($selectors as $selector => $attributes) {
+       $element = $assert->elementExists('css', $selector);
++      if ($self_closing) {
++        self::assertStringContainsString("</$selector", $element->getParent()->getHtml());
++      }
+       foreach ($attributes as $attribute => $value) {
+         if (isset($value)) {
+           $this->assertStringContainsString($value, $element->getAttribute($attribute));
+diff --git a/web/core/modules/media/tests/src/FunctionalJavascript/MediaEmbedFilterConfigurationUiTest.php b/web/core/modules/media/tests/src/FunctionalJavascript/MediaEmbedFilterConfigurationUiTest.php
+index 6b142dc1..321e2703 100644
+--- a/web/core/modules/media/tests/src/FunctionalJavascript/MediaEmbedFilterConfigurationUiTest.php
++++ b/web/core/modules/media/tests/src/FunctionalJavascript/MediaEmbedFilterConfigurationUiTest.php
+@@ -52,7 +52,6 @@ protected function setUp(): void {
+ 
+   /**
+    * @covers ::media_form_filter_format_add_form_alter
+-   * @covers ::media_filter_format_edit_form_validate
+    * @dataProvider providerTestValidations
+    */
+   public function testValidationWhenAdding($filter_html_status, $filter_align_status, $filter_caption_status, $filter_html_image_secure_status, $media_embed, $allowed_html, $expected_error_message) {
+@@ -100,7 +99,6 @@ public function testValidationWhenAdding($filter_html_status, $filter_align_stat
+ 
+   /**
+    * @covers ::media_form_filter_format_edit_form_alter
+-   * @covers ::media_filter_format_edit_form_validate
+    * @dataProvider providerTestValidations
+    */
+   public function testValidationWhenEditing($filter_html_status, $filter_align_status, $filter_caption_status, $filter_html_image_secure_status, $media_embed, $allowed_html, $expected_error_message) {
+@@ -255,10 +253,10 @@ public function providerTestValidations() {
+    */
+   protected function showHiddenFields() {
+     $script = <<<JS
+-      var hidden_fields = document.querySelectorAll(".visually-hidden");
++      var hidden_fields = document.querySelectorAll(".hidden");
+ 
+       [].forEach.call(hidden_fields, function(el) {
+-        el.classList.remove("visually-hidden");
++        el.classList.remove("hidden");
+       });
+ JS;
+ 
+diff --git a/web/core/modules/media/tests/src/FunctionalJavascript/MediaUiJavascriptTest.php b/web/core/modules/media/tests/src/FunctionalJavascript/MediaUiJavascriptTest.php
+index 29576b4c..a46367c7 100644
+--- a/web/core/modules/media/tests/src/FunctionalJavascript/MediaUiJavascriptTest.php
++++ b/web/core/modules/media/tests/src/FunctionalJavascript/MediaUiJavascriptTest.php
+@@ -189,8 +189,10 @@ public function testMediaTypes() {
+ 
+     // Tests media type delete form.
+     $page->clickLink('Delete');
+-    $assert_session->addressEquals('admin/structure/media/manage/' . $this->testMediaType->id() . '/delete');
+-    $page->pressButton('Delete');
++    $assert_session->assertWaitOnAjaxRequest();
++    $this->assertNotEmpty($assert_session->waitForElementVisible('css', '#drupal-modal'));
++    $assert_session->addressEquals('admin/structure/media/manage/' . $this->testMediaType->id());
++    $this->click('.ui-dialog button:contains("Delete")');
+     $assert_session->addressEquals('admin/structure/media');
+     $assert_session->pageTextContains('The media type ' . $new_name . ' has been deleted.');
+ 
+@@ -202,8 +204,10 @@ public function testMediaTypes() {
+     $media->save();
+     $this->drupalGet('admin/structure/media/manage/' . $media_type2->id());
+     $page->clickLink('Delete');
+-    $assert_session->addressEquals('admin/structure/media/manage/' . $media_type2->id() . '/delete');
+-    $assert_session->buttonNotExists('edit-submit');
++    $assert_session->assertWaitOnAjaxRequest();
++    $this->assertNotEmpty($assert_session->waitForElementVisible('css', '#drupal-modal'));
++    $assert_session->addressEquals('admin/structure/media/manage/' . $media_type2->id());
++    $assert_session->elementNotExists('css', '.ui-dialog button:contains("Delete")');
+     $assert_session->pageTextContains("$label2 is used by 1 media item on your site. You can not remove this media type until you have removed all of the $label2 media items.");
+   }
+ 
+diff --git a/web/core/modules/media/tests/src/Kernel/MediaSourceTest.php b/web/core/modules/media/tests/src/Kernel/MediaSourceTest.php
+index b6e67c89..1be735f7 100644
+--- a/web/core/modules/media/tests/src/Kernel/MediaSourceTest.php
++++ b/web/core/modules/media/tests/src/Kernel/MediaSourceTest.php
+@@ -15,6 +15,11 @@
+  */
+ class MediaSourceTest extends MediaKernelTestBase {
+ 
++  /**
++   * {@inheritdoc}
++   */
++  protected static $modules = ['field_ui'];
++
+   /**
+    * Tests that metadata is correctly mapped irrespective of how media is saved.
+    */
+@@ -506,6 +511,24 @@ public function testSourceFieldCreation() {
+     $this->assertTrue($field->isRequired(), 'Field is not required.');
+     $this->assertEquals('Test source with constraints', $field->label(), 'Incorrect label is used.');
+     $this->assertSame('test_constraints_type', $field->getTargetBundle(), 'Field is not targeting correct bundle.');
++
++    // Test that new source fields respect the configured field prefix, no
++    // prefix at all if that's what's configured.
++    $this->installConfig('field_ui');
++    $this->config('field_ui.settings')
++      ->set('field_prefix', 'prefix_')
++      ->save();
++    $type = MediaType::create([
++      'id' => $this->randomMachineName(),
++      'label' => $this->randomString(),
++      'source' => 'test',
++    ]);
++    $this->assertSame('prefix_media_test', $type->getSource()->createSourceField($type)->getName());
++
++    $this->config('field_ui.settings')
++      ->set('field_prefix', '')
++      ->save();
++    $this->assertSame('media_test', $type->getSource()->createSourceField($type)->getName());
+   }
+ 
+   /**
+diff --git a/web/core/modules/media/tests/src/Kernel/OEmbedIframeControllerTest.php b/web/core/modules/media/tests/src/Kernel/OEmbedIframeControllerTest.php
+index c71c2e32..479c2313 100644
+--- a/web/core/modules/media/tests/src/Kernel/OEmbedIframeControllerTest.php
++++ b/web/core/modules/media/tests/src/Kernel/OEmbedIframeControllerTest.php
+@@ -6,6 +6,7 @@
+ use Drupal\media\Controller\OEmbedIframeController;
+ use Drupal\media\OEmbed\Provider;
+ use Drupal\media\OEmbed\Resource;
++use Drupal\TestTools\Random;
+ use Prophecy\Argument;
+ use Symfony\Component\HttpFoundation\Request;
+ 
+@@ -26,13 +27,13 @@ class OEmbedIframeControllerTest extends MediaKernelTestBase {
+    *
+    * @return array
+    */
+-  public function providerBadHashParameter() {
++  public static function providerBadHashParameter() {
+     return [
+       'no hash' => [
+         '',
+       ],
+       'invalid hash' => [
+-        $this->randomString(),
++        Random::string(),
+       ],
+     ];
+   }
